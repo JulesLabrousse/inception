@@ -1,0 +1,6 @@
+srcs/.env
+secrets/*
+!secrets/.gitkeep
+*.pem
+*.key
+.DS_Store
