@@ -3,7 +3,7 @@
 from pathlib import Path
 import os
 import secrets
-root = Path(__file__).resolve().parents[1]
+root = Path(__file__).resolve().parents[2]
 os.chdir(root)
 env = root / 'srcs/.env'
 if not env.exists():
@@ -17,4 +17,4 @@ for name, count in [('db_password', 1), ('db_root_password', 1), ('credentials',
             f.write(''.join(secrets.token_hex(32) + '\n' for _ in range(count)))
     except FileExistsError:
         pass
-print('Configuration prête. Adapter srcs/.env, puis créer DATA_PATH/{mariadb,wordpress} sur la VM Linux.')
+print('Configuration prête. Adapter srcs/.env, puis configurer le data-root Docker selon DEV_DOC.md sur la VM Linux.')

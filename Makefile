@@ -1,15 +1,17 @@
 DOCKER ?= docker
 COMPOSE = $(DOCKER) compose --env-file srcs/.env -f srcs/docker-compose.yml
 .DEFAULT_GOAL := up
-.PHONY: all setup config build up down stop start restart logs ps test clean re
+.PHONY: all setup config build up down stop start restart logs ps test clean re preflight check
 all: up
 setup:
-	python3 tools/setup.py
+	python3 srcs/tools/setup.py
 config:
 	$(COMPOSE) config --quiet
-build: config
+preflight: config
+	python3 srcs/tools/check_storage.py $(DOCKER)
+build: preflight
 	$(COMPOSE) build
-up: config
+up: preflight
 	$(COMPOSE) up -d --build --wait --wait-timeout 240
 down:
 	$(COMPOSE) down
@@ -23,7 +25,9 @@ logs:
 	$(COMPOSE) logs --tail=100
 ps:
 	$(COMPOSE) ps
+check: config
+	python3 -B srcs/tests/test_storage.py
 test:
-	DOCKER=$(DOCKER) bash tests/integration.sh
+	DOCKER=$(DOCKER) bash srcs/tests/integration.sh
 clean: down
 re: down up

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Run on the dedicated Linux VM after make setup and DATA_PATH preparation.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 compose=("${DOCKER:-docker}" compose --env-file srcs/.env -f srcs/docker-compose.yml)
 "${compose[@]}" config --quiet
+python3 srcs/tools/check_storage.py "${DOCKER:-docker}"
 "${compose[@]}" up -d --build --wait --wait-timeout 240
 wp() { "${compose[@]}" exec -T wordpress wp --allow-root "$@"; }
 domain=$("${compose[@]}" exec -T nginx printenv DOMAIN_NAME | tr -d '\r')

@@ -1,44 +1,100 @@
 # Guide développeur
 
 ## Préparation et structure
-Le dépôt initial GitHub était vide (API contents : « This repository is empty »). Aucun historique, secret ou code existant n’a été écrasé.
+Le dépôt initial GitHub était vide. Le sujet exact fourni ensuite est Inception v5.3. Toutes les configurations et tous les outils sont sous `srcs/` ; Makefile et documents sont à la racine. `secrets/` est local et ignoré, conformément à l’exemple du sujet.
 
-`srcs/docker-compose.yml` définit trois services, leurs builds, les secrets, le bridge et les volumes ; chaque `requirements/SERVICE` possède son Dockerfile, sa configuration et ses outils. Le Makefile racine centralise les commandes. `tools/setup.py` génère les secrets privés et copie `.env.example` sans écrasement. `tests/integration.sh` s’exécute sur la VM de test.
+Prérequis : VM Linux dédiée, Docker Engine rootful, Compose v2 avec `up --wait`, Make, Python 3, curl et OpenSSL. Réseau nécessaire pour les paquets Debian, GitHub et WordPress pendant le build et pour la génération des salts WordPress au premier démarrage. Docker Desktop n’est pas la cible de validation du sujet.
 
-Prérequis : VM Linux dédiée, Docker Engine, Compose v2 avec `up --wait`, Make, Python 3, curl et OpenSSL côté test. Accès réseau nécessaire pendant le build (Debian, GitHub, WordPress). `make setup`, adapter `.env`, créer `/home/LOGIN/data/{mariadb,wordpress}`, puis `make config`, `make build`, `make up`, `make test`. Pour Docker Desktop, les chemins de volumes sont interprétés sur l’hôte du moteur Linux et nécessitent un partage approprié ; préférer la VM Linux d’évaluation.
+Exécuter `make setup`, adapter `srcs/.env` (login 42 réel, domaine `LOGIN.42.fr`, `DATA_PATH=/home/LOGIN/data`, noms et emails), puis préparer le moteur ci-dessous. Ne pas changer les secrets après initialisation sans rotation coordonnée des comptes.
+
+## Stockage obligatoire sans bind mounts
+Le sujet interdit les bind mounts pour les deux stockages persistants. Les anciennes options `type: none`, `o: bind`, `device:` ont été supprimées. Les volumes `mariadb_data` et `wordpress_data` sont des volumes natifs du driver local, sans options.
+
+Pour les placer sous `/home/LOGIN/data`, configurer le `data-root` de Docker Engine sur ce chemin. Cette configuration concerne tout le moteur : utiliser une VM dédiée, fraîche, avant son premier lancement du projet. Si le moteur contient déjà des données, sauvegarder celles-ci et organiser leur migration avant de changer sa configuration ; changer le chemin ne migre rien automatiquement.
+
+Sur une VM fraîche, remplacer LOGIN par le login réel :
+
+```sh
+sudo systemctl stop docker.service docker.socket
+sudo mkdir -p /etc/docker /home/LOGIN/data
+# Si daemon.json existe, le sauvegarder puis conserver ses autres paramètres.
+sudoedit /etc/docker/daemon.json
+```
+
+Ajouter la propriété suivante à l’objet JSON (ne pas écraser d’autres réglages existants) :
+
+```json
+{
+  "data-root": "/home/LOGIN/data"
+}
+```
+
+Puis :
+
+```sh
+sudo dockerd --validate --config-file=/etc/docker/daemon.json
+sudo systemctl start docker.service
+docker info --format '{{.DockerRootDir}}'
+make config
+make build
+make up
+make test
+```
+
+Le chemin retourné doit être `/home/LOGIN/data`. Les contenus seront sous :
+
+```text
+/home/LOGIN/data/volumes/mariadb_data/_data
+/home/LOGIN/data/volumes/wordpress_data/_data
+```
+
+`srcs/tools/check_storage.py`, appelé avant build/up et dans les tests, refuse un mauvais data-root, un domaine différent de LOGIN.42.fr, ou des volumes existants avec options bind. Il ne modifie pas le moteur. `srcs/.env` décrit le chemin attendu ; seul le fichier daemon.json configure effectivement le stockage Docker. Les volumes ne doivent pas être utilisés par un autre projet sur ce moteur.
+
+Si l’ancienne version du projet a déjà tourné : arrêter les services, sauvegarder la base et les fichiers à froid, conserver les secrets et wp-config, puis migrer dans des volumes natifs neufs sur le moteur correctement configuré. Les objets volumes existants conservent leurs options : changer Compose ne les transforme pas. Ne supprimer les anciens objets et dossiers qu’après vérification de la sauvegarde et de la restauration. Ne jamais effacer les données automatiquement pour faire passer le contrôle.
 
 ## Construction et processus
-Les trois Dockerfiles partent de `debian:12-slim`. Tags locaux : `nginx:inception`, `wordpress:inception`, `mariadb:inception`. Aucun téléchargement d’image WordPress, NGINX ou MariaDB du registre. La version WordPress est téléchargée au build et contrôlée par les checksums officiels. Les sources sont copiées du build vers le volume au premier démarrage. WP-CLI est téléchargé depuis sa release versionnée sous HTTPS ; sa signature indépendante n’est pas vérifiée dans ce projet.
+Chaque service construit son propre Dockerfile depuis `debian:12-slim`. Tags : `nginx:inception`, `wordpress:inception`, `mariadb:inception`. Aucune image applicative n’est téléchargée. Debian 12 est l’avant-dernière version stable majeure à la date de l’audit, Debian 13 étant stable. WordPress est téléchargé au build en version 7.1.3 avec contrôle des checksums officiels. WP-CLI 2.12.0 vient de sa release HTTPS versionnée ; sa signature indépendante n’est pas vérifiée.
 
-Après initialisation, `exec` remplace le shell par `nginx -g 'daemon off;'`, `php-fpm8.2 -F` ou `mariadbd --user=mysql --console`. Pas de superviseur, de service en arrière-plan permanent ou de commande de maintien artificiel. Les attentes d’initialisation sont bornées (60 essais), avec échec explicite. MariaDB a un processus temporaire socket-only pour l’installation, arrêté et attendu avant l’exec final ; les signaux déclenchent son nettoyage.
+Les entrypoints terminent par `exec` : NGINX au premier plan, PHP-FPM avec `-F`, MariaDB avec `--console`. Attentes bornées et échec explicite ; aucun maintien artificiel. MariaDB utilise temporairement une instance socket-only pour initialiser le datadir ; son arrêt est attendu avant l’exec et les signaux déclenchent son nettoyage.
 
-Les healthchecks vérifient une requête SQL authentifiée, le ping FastCGI et une route HTTPS NGINX. Le dernier teste NGINX seul : le test d’intégration complète vérifie aussi `/` et `/wp-login.php`. `depends_on: service_healthy` ordonne le démarrage, sans garantir la disponibilité permanente ; `restart: unless-stopped` redémarre un processus qui meurt, pas un service seulement unhealthy. NGINX utilise le résolveur Docker pour retrouver une nouvelle IP WordPress après recréation.
+Les healthchecks testent une requête SQL authentifiée, le ping FastCGI et NGINX en HTTPS. Le test d’intégration vérifie aussi le site WordPress. `depends_on: service_healthy` ordonne le démarrage ; `restart: unless-stopped` redémarre les processus morts, sans soigner un service seulement unhealthy. NGINX résout de nouveau l’IP de WordPress via le DNS Docker après recréation.
 
-## Idempotence et état
-MariaDB initialise seulement un datadir neuf, crée la base et un compte dédié limité à cette base, supprime les accès root distants et les comptes anonymes, puis fixe le mot de passe root local. `.inception-ready` n’est écrit qu’après arrêt propre de l’instance temporaire. Un datadir avec tables système mais sans marqueur est rejeté : une interruption exige une restauration ou un reset explicite d’un volume neuf, jamais un effacement automatique. L’authentification root distante n’est pas autorisée.
+## Idempotence et secrets
+MariaDB initialise seulement un datadir neuf : base dédiée, compte limité à cette base, root local avec mot de passe, suppression des comptes anonymes et root distants. `.inception-ready` n’est écrit qu’après arrêt propre. Des tables système sans marqueur sont traitées comme une initialisation interrompue ou un datadir étranger : restaurer ou réinitialiser explicitement un volume jetable, jamais effacer automatiquement.
 
-WordPress garde son `wp-config.php` persistant et teste `wp core is-installed`. Il ne réinstalle pas une base existante et ne réinitialise pas les mots de passe. Le second compte est créé uniquement s’il manque. Le compte administrateur n’a pas « admin » dans son login. `WP_TITLE`, les emails et secrets d’installation ne synchronisent pas des comptes existants. Changer `MYSQL_DATABASE` ne migre pas la base et ne remplace pas `wp-config.php` : une migration est manuelle. Les mots de passe générés doivent rester des chaînes hexadécimales d’au moins 32 caractères ; le fichier credentials doit avoir exactement deux lignes terminées par newline.
+WordPress garde son `wp-config.php` et teste `wp core is-installed`. Il ne remplace pas une installation ni ses mots de passe. Le second utilisateur abonné est créé seulement s’il manque. Le login propriétaire ne contient pas « admin ». Les secrets générés sont des chaînes hexadécimales d’au moins 32 caractères ; `credentials.txt` contient exactement deux lignes terminées par newline, propriétaire puis abonné.
 
-Le certificat autosigné est généré dans le conteneur NGINX et renouvelé si absent ou proche expiration ; une recréation peut changer son empreinte. La clé privée n’entre pas dans une image ou dans Git. En exploitation, remplacer ce mécanisme par une gestion explicite de certificats adaptée au contexte.
+`WP_TITLE`, les emails et les mots de passe initiaux ne synchronisent pas le site existant. Changer MYSQL_DATABASE ne migre rien et ne remplace pas le wp-config persistant. Toute rotation SQL exige de modifier le compte SQL, le wp-config et les secrets de façon cohérente. WordPress ne reçoit pas le secret root.
 
-## Volumes, sauvegarde et restauration
-Les volumes `mariadb_data` et `wordpress_data` pointent vers `${DATA_PATH}/mariadb` et `${DATA_PATH}/wordpress`. Le réseau se nomme `inception`. Les noms fixes supposent une seule instance sur cette VM. Ne pas lancer ce projet sur un moteur où ces noms sont déjà utilisés par d’autres services.
+Le certificat autosigné est généré localement au conteneur et renouvelé si absent ou proche expiration. Une recréation NGINX peut changer son empreinte. La clé n’est jamais embarquée dans une image ou publiée dans Git.
 
-Sauvegarde froide cohérente (remplacer les chemins LOGIN et BACKUP) :
+## Gestion, sauvegarde et restauration
+`make ps`, `make logs`, `make stop`, `make start`, `make down` et `make up` gèrent le cycle de vie. `make clean` conserve les volumes comme `down`. `docker compose down -v` détruit les volumes natifs et leur contenu : aucune cible Make ne le fait.
+
+Contrôles :
+
+```sh
+docker volume inspect mariadb_data wordpress_data
+docker network inspect inception
+docker compose --env-file srcs/.env -f srcs/docker-compose.yml exec nginx nginx -t
+docker compose --env-file srcs/.env -f srcs/docker-compose.yml exec wordpress php-fpm8.2 -tt
+docker compose --env-file srcs/.env -f srcs/docker-compose.yml exec mariadb cat /proc/1/comm
+```
+
+Sauvegarde froide cohérente sur le moteur configuré, après vérification des Mountpoint :
 
 ```sh
 make down
-sudo tar --numeric-owner -C /home/LOGIN/data -czf /CHEMIN/PRIVE/BACKUP-data.tgz mariadb wordpress
-# Sauvegarder aussi srcs/.env et secrets/ dans un support privé protégé.
+sudo tar --numeric-owner -C /home/LOGIN/data/volumes \
+  -czf /CHEMIN/PRIVE/BACKUP-data.tgz mariadb_data/_data wordpress_data/_data
+# Sauvegarder aussi srcs/.env et secrets/ sur un support privé protégé.
 make up
 ```
 
-Pour restaurer : arrêter les services, conserver une copie de l’état actuel, préparer des dossiers de destination vides, extraire l’archive avec les propriétaires et permissions d’origine, remettre la configuration et les secrets correspondants, puis `make up` et `make test`. Ne jamais écraser à chaud un datadir MariaDB. Une mise à niveau de version MariaDB exige une procédure compatible et un test de restauration.
+Restauration : arrêter la stack, conserver une sauvegarde de son état actuel, préparer un moteur au bon data-root et des volumes natifs vides (`docker volume create mariadb_data`, puis `docker volume create wordpress_data`). Vérifier leurs Mountpoint ; extraire l’archive dans `/home/LOGIN/data/volumes` avec les propriétaires et permissions d’origine. Remettre la configuration et les secrets correspondants, puis `make up` et `make test`. Ne pas restaurer à chaud ni écraser des volumes non vides. Une mise à niveau MariaDB exige une procédure de migration compatible et un test de restauration.
 
-`make down` enlève conteneurs et réseau sans supprimer les données. `make clean` a volontairement le même effet. Aucun objectif Make ne supprime automatiquement les dossiers. Pour repartir de zéro sur une VM jetable, sauvegarder puis supprimer explicitement les deux dossiers et les objets volumes, recréer les dossiers et relancer ; cette opération détruit articles, utilisateurs et uploads.
-
-## Modifier et vérifier
-Pour changer la limite NGINX, éditer `srcs/requirements/nginx/conf/inception.conf.template`, puis :
+## Modification en direct et validation
+Pour changer la limite d’upload, modifier `srcs/requirements/nginx/conf/inception.conf.template`, reconstruire seulement NGINX et vérifier sa configuration :
 
 ```sh
 docker compose --env-file srcs/.env -f srcs/docker-compose.yml build nginx
@@ -46,6 +102,6 @@ docker compose --env-file srcs/.env -f srcs/docker-compose.yml up -d --no-deps n
 docker compose --env-file srcs/.env -f srcs/docker-compose.yml exec nginx nginx -T
 ```
 
-NGINX ne change pas les limites PHP ; adapter aussi `uploads.ini` si nécessaire. Inspecter la configuration PHP avec `php-fpm8.2 -tt`, le réseau avec `docker network inspect inception`, les volumes avec `docker volume inspect mariadb_data wordpress_data`, le PID 1 avec `docker compose ... exec SERVICE cat /proc/1/comm`. Utiliser les options Compose du Makefile pour toutes ces commandes.
+Les limites PHP sont distinctes, dans `uploads.ini`. `srcs/tests/integration.sh` vérifie TLS, comptes, PID 1, ports, secrets et persistance après down/up. Il provoque une interruption temporaire. Exécuter aussi les contrôles manuels de VALIDATION.md.
 
-Avant publication : `git ls-files secrets srcs/.env`, `git check-ignore secrets/db_password.txt`, recherche de credentials dans les fichiers suivis et dans `git log -p --all`. Une fois le dépôt utilisé, vérifier aussi l’historique complet avec un scanner de secrets. Les fichiers d’exemple ne contiennent aucun mot de passe.
+Avant publication : vérifier `git ls-files secrets srcs/.env`, les exclusions Git, les fichiers suivis et `git log -p --all`, éventuellement avec un scanner de secrets. Ne jamais publier les fichiers locaux de mots de passe.

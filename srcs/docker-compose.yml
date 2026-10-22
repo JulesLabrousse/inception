@@ -66,17 +66,9 @@ volumes:
   mariadb_data:
     name: mariadb_data
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${DATA_PATH:?Set DATA_PATH}/mariadb
   wordpress_data:
     name: wordpress_data
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${DATA_PATH:?Set DATA_PATH}/wordpress
 secrets:
   db_password:
     file: ../secrets/db_password.txt
